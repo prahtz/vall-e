@@ -37,12 +37,8 @@ class LayerNorm(nn.Module):
         self.eps = eps
         self.elementwise_affine = elementwise_affine
         if self.elementwise_affine:
-            self.weight = nn.Parameter(
-                torch.empty(self.normalized_shape, **factory_kwargs)
-            )
-            self.bias = nn.Parameter(
-                torch.empty(self.normalized_shape, **factory_kwargs)
-            )
+            self.weight = nn.Parameter(torch.empty(self.normalized_shape, **factory_kwargs))
+            self.bias = nn.Parameter(torch.empty(self.normalized_shape, **factory_kwargs))
         else:
             self.register_parameter("weight", None)
             self.register_parameter("bias", None)
@@ -69,15 +65,10 @@ class LayerNorm(nn.Module):
             )
 
         assert embedding is None
-        return F.layer_norm(
-            input, self.normalized_shape, self.weight, self.bias, self.eps
-        )
+        return F.layer_norm(input, self.normalized_shape, self.weight, self.bias, self.eps)
 
     def extra_repr(self) -> str:
-        return (
-            "{normalized_shape}, eps={eps}, "
-            "elementwise_affine={elementwise_affine}".format(**self.__dict__)
-        )
+        return "{normalized_shape}, eps={eps}, " "elementwise_affine={elementwise_affine}".format(**self.__dict__)
 
 
 class AdaptiveLayerNorm(nn.Module):
@@ -210,13 +201,9 @@ class TransformerEncoderLayer(nn.Module):
         )
 
         # Implementation of Feedforward model
-        self.linear1 = linear1_feedforward_cls(
-            d_model, dim_feedforward, **factory_kwargs
-        )
+        self.linear1 = linear1_feedforward_cls(d_model, dim_feedforward, **factory_kwargs)
         self.dropout = nn.Dropout(dropout)
-        self.linear2 = linear2_feedforward_cls(
-            dim_feedforward, d_model, **factory_kwargs
-        )
+        self.linear2 = linear2_feedforward_cls(dim_feedforward, d_model, **factory_kwargs)
 
         self.norm_first = norm_first
         self.dropout1 = nn.Dropout(dropout)
@@ -242,13 +229,9 @@ class TransformerEncoderLayer(nn.Module):
 
         norm1 = layer_norm_cls(d_model, eps=layer_norm_eps, **factory_kwargs)
         if layer_norm_cls == IdentityNorm:
-            norm2 = BalancedBasicNorm(
-                d_model, eps=layer_norm_eps, **factory_kwargs
-            )
+            norm2 = BalancedBasicNorm(d_model, eps=layer_norm_eps, **factory_kwargs)
         else:
-            norm2 = layer_norm_cls(
-                d_model, eps=layer_norm_eps, **factory_kwargs
-            )
+            norm2 = layer_norm_cls(d_model, eps=layer_norm_eps, **factory_kwargs)
 
         if adaptive_layer_norm:
             self.norm1 = AdaptiveLayerNorm(d_model, norm1)
@@ -267,6 +250,8 @@ class TransformerEncoderLayer(nn.Module):
         src: Tensor,
         src_mask: Optional[Tensor] = None,
         src_key_padding_mask: Optional[Tensor] = None,
+        past_sa_keys: Optional[Tensor] = None,
+        return_sa_keys: bool = True,
     ) -> Tensor:
         r"""Pass the input through the encoder layer.
 
@@ -286,27 +271,26 @@ class TransformerEncoderLayer(nn.Module):
 
         if src_key_padding_mask is not None:
             _skpm_dtype = src_key_padding_mask.dtype
-            if _skpm_dtype != torch.bool and not torch.is_floating_point(
-                src_key_padding_mask
-            ):
-                raise AssertionError(
-                    "only bool and floating types of key_padding_mask are supported"
-                )
+            if _skpm_dtype != torch.bool and not torch.is_floating_point(src_key_padding_mask):
+                raise AssertionError("only bool and floating types of key_padding_mask are supported")
 
         if self.norm_first:
-            x = x + self._sa_block(
-                self.norm1(x, stage_embedding),
-                src_mask,
-                src_key_padding_mask,
-            )
+            sa_out = self._sa_block(self.norm1(x, stage_embedding), src_mask, src_key_padding_mask, past_sa_keys, return_sa_keys)
+            if return_sa_keys:
+                sa_out, sa_keys = sa_out
+            x = x + sa_out
             x = x + self._ff_block(self.norm2(x, stage_embedding))
         else:
-            x = self.norm1(
-                x + self._sa_block(x, src_mask, src_key_padding_mask),
-                stage_embedding,
-            )
+            sa_out = self._sa_block(x, src_mask, src_key_padding_mask, past_sa_keys, return_sa_keys)
+            if return_sa_keys:
+                sa_out, sa_keys = sa_out
+            x = self.norm1(x + sa_out, stage_embedding)
             x = self.norm2(x + self._ff_block(x), stage_embedding)
 
+        if return_sa_keys:
+            if is_src_tuple:
+                return (x, stage_embedding, sa_keys)
+            return x, sa_keys
         if is_src_tuple:
             return (x, stage_embedding)
         return x
@@ -317,16 +301,25 @@ class TransformerEncoderLayer(nn.Module):
         x: Tensor,
         attn_mask: Optional[Tensor],
         key_padding_mask: Optional[Tensor],
+        past_keys: Optional[Tensor] = None,
+        return_keys: bool = False,
     ) -> Tensor:
+        q, k, v = x, x, x
+        if past_keys is not None:
+            k = torch.cat((past_keys, k), dim=int(self.self_attn.batch_first))
+            v = k
         x = self.self_attn(
-            x,
-            x,
-            x,
+            q,
+            k,
+            v,
             attn_mask=attn_mask,
             key_padding_mask=key_padding_mask,
             need_weights=False,
         )[0]
-        return self.dropout1(x)
+        x = self.dropout(x)
+        if return_keys:
+            return x, k
+        return x
 
     # feed forward block
     def _ff_block(self, x: Tensor) -> Tensor:
@@ -366,6 +359,8 @@ class TransformerEncoder(nn.Module):
         mask: Optional[Tensor] = None,
         src_key_padding_mask: Optional[Tensor] = None,
         return_layer_states: bool = False,
+        past_sa_keys: Optional[List[Tensor]] = None,
+        return_sa_keys: bool = False,
     ) -> Tensor:
         r"""Pass the input through the encoder layers in turn.
 
@@ -378,32 +373,34 @@ class TransformerEncoder(nn.Module):
         Shape:
             see the docs in Transformer class.
         """
-        if return_layer_states:
-            layer_states = []  # layers' output
-            output = src
-            for mod in self.layers:
-                output = mod(
-                    output,
-                    src_mask=mask,
-                    src_key_padding_mask=src_key_padding_mask,
-                )
-                layer_states.append(output[0])
-
-            if self.norm is not None:
-                output = self.norm(output)
-
-            return layer_states, output
+        if past_sa_keys is None:
+            past_sa_keys = [None for _ in range(len(self.layers))]
+        layer_sa_keys = []
+        layer_states = []  # layers' output
 
         output = src
-        for mod in self.layers:
+        for mod, keys in zip(self.layers, past_sa_keys):
             output = mod(
-                output, src_mask=mask, src_key_padding_mask=src_key_padding_mask
+                output,
+                src_mask=mask,
+                src_key_padding_mask=src_key_padding_mask,
+                past_sa_keys=keys,
+                return_sa_keys=return_sa_keys,
             )
+            if return_sa_keys:
+                output, sa_keys = output
+                layer_sa_keys.append(sa_keys)
+            if return_layer_states:
+                layer_states.append(output)
 
         if self.norm is not None:
             output = self.norm(output)
-
-        return output
+        out = (output,)
+        if return_layer_states:
+            out = (layer_states,) + out
+        if return_sa_keys:
+            out = (layer_sa_keys,) + out
+        return out[0] if len(out) == 1 else out
 
 
 class TransformerDecoderLayer(nn.Module):
@@ -449,13 +446,9 @@ class TransformerDecoderLayer(nn.Module):
             **factory_kwargs,
         )
         # Implementation of Feedforward model
-        self.linear1 = linear1_feedforward_cls(
-            d_model, dim_feedforward, **factory_kwargs
-        )
+        self.linear1 = linear1_feedforward_cls(d_model, dim_feedforward, **factory_kwargs)
         self.dropout = nn.Dropout(dropout)
-        self.linear2 = linear2_feedforward_cls(
-            dim_feedforward, d_model, **factory_kwargs
-        )
+        self.linear2 = linear2_feedforward_cls(dim_feedforward, d_model, **factory_kwargs)
 
         self.norm_first = norm_first
         self.dropout1 = nn.Dropout(dropout)
@@ -473,34 +466,20 @@ class TransformerDecoderLayer(nn.Module):
             self.activation = activation
 
         if adaptive_layer_norm:
-            norm1 = layer_norm_cls(
-                d_model, eps=layer_norm_eps, **factory_kwargs
-            )
-            norm2 = layer_norm_cls(
-                d_model, eps=layer_norm_eps, **factory_kwargs
-            )
-            norm3 = layer_norm_cls(
-                d_model, eps=layer_norm_eps, **factory_kwargs
-            )
+            norm1 = layer_norm_cls(d_model, eps=layer_norm_eps, **factory_kwargs)
+            norm2 = layer_norm_cls(d_model, eps=layer_norm_eps, **factory_kwargs)
+            norm3 = layer_norm_cls(d_model, eps=layer_norm_eps, **factory_kwargs)
 
             self.norm1 = AdaptiveLayerNorm(d_model, norm1)
             self.norm2 = AdaptiveLayerNorm(d_model, norm2)
             self.norm3 = AdaptiveLayerNorm(d_model, norm3)
         else:
-            self.norm1 = layer_norm_cls(
-                d_model, eps=layer_norm_eps, **factory_kwargs
-            )
-            self.norm2 = layer_norm_cls(
-                d_model, eps=layer_norm_eps, **factory_kwargs
-            )
+            self.norm1 = layer_norm_cls(d_model, eps=layer_norm_eps, **factory_kwargs)
+            self.norm2 = layer_norm_cls(d_model, eps=layer_norm_eps, **factory_kwargs)
             if layer_norm_cls == IdentityNorm:
-                self.norm3 = BalancedBasicNorm(
-                    d_model, eps=layer_norm_eps, **factory_kwargs
-                )
+                self.norm3 = BalancedBasicNorm(d_model, eps=layer_norm_eps, **factory_kwargs)
             else:
-                self.norm3 = layer_norm_cls(
-                    d_model, eps=layer_norm_eps, **factory_kwargs
-                )
+                self.norm3 = layer_norm_cls(d_model, eps=layer_norm_eps, **factory_kwargs)
 
     def forward(
         self,
@@ -532,9 +511,7 @@ class TransformerDecoderLayer(nn.Module):
             x, stage_embedding = tgt, None
 
         if self.norm_first:
-            x = x + self._sa_block(
-                self.norm1(x, stage_embedding), tgt_mask, tgt_key_padding_mask
-            )
+            x = x + self._sa_block(self.norm1(x, stage_embedding), tgt_mask, tgt_key_padding_mask)
             x = x + self._mha_block(
                 self.norm2(x, stage_embedding),
                 memory,
@@ -548,10 +525,7 @@ class TransformerDecoderLayer(nn.Module):
                 stage_embedding,
             )
             x = self.norm2(
-                x
-                + self._mha_block(
-                    x, memory, memory_mask, memory_key_padding_mask
-                ),
+                x + self._mha_block(x, memory, memory_mask, memory_key_padding_mask),
                 stage_embedding,
             )
             x = self.norm3(x + self._ff_block(x), stage_embedding)
@@ -611,6 +585,4 @@ def _get_activation_fn(activation: str) -> Callable[[Tensor], Tensor]:
     elif activation == "gelu":
         return F.gelu
 
-    raise RuntimeError(
-        "activation should be relu/gelu, not {}".format(activation)
-    )
+    raise RuntimeError("activation should be relu/gelu, not {}".format(activation))

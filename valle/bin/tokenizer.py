@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Phonemize Text and EnCodec Audio.
+Phonemize Text and EnCodec/TiCodec Audio.
 
 Usage example:
     python3 bin/tokenizer.py \
@@ -35,6 +35,8 @@ from tqdm.auto import tqdm
 from valle.data import (
     AudioTokenConfig,
     AudioTokenExtractor,
+    TiCodecAudioTokenConfig,
+    TiCodecAudioTokenExtractor,
     TextTokenizer,
     tokenize_text,
 )
@@ -78,7 +80,19 @@ def get_args():
         "--audio-extractor",
         type=str,
         default="Encodec",
-        help="Encodec or Fbank",
+        help="Encodec, TiCodec or Fbank",
+    )
+    parser.add_argument(
+        "--ticodec-config-path",
+        type=str,
+        default=None,
+        help="TiCodec config file path",
+    )
+    parser.add_argument(
+        "--ticodec-ckpt-path",
+        type=str,
+        default=None,
+        help="TiCodec checkpoint file path",
     )
     parser.add_argument(
         "--dataset-parts",
@@ -102,8 +116,7 @@ def get_args():
         "--batch-duration",
         type=float,
         default=400.0,
-        help="The maximum number of audio seconds in a batch."
-        "Determines batch size dynamically.",
+        help="The maximum number of audio seconds in a batch." "Determines batch size dynamically.",
     )
 
     return parser.parse_args()
@@ -144,6 +157,11 @@ def main():
     if args.audio_extractor:
         if args.audio_extractor == "Encodec":
             audio_extractor = AudioTokenExtractor(AudioTokenConfig())
+        elif args.audio_extractor == "TiCodec":
+            assert args.ticodec_config_path is not None and args.ticodec_ckpt_path is not None
+            audio_extractor = TiCodecAudioTokenExtractor(
+                TiCodecAudioTokenConfig(config_path=args.ticodec_config_path, ckpt_path=args.ticodec_ckpt_path)
+            )
         else:
             assert args.audio_extractor == "Fbank"
             audio_extractor = get_fbank_extractor()
@@ -158,9 +176,7 @@ def main():
         prefix = f"{prefix}_"
     with get_executor() as ex:
         for partition, m in manifests.items():
-            logging.info(
-                f"Processing partition: {partition} CUDA: {torch.cuda.is_available()}"
-            )
+            logging.info(f"Processing partition: {partition} CUDA: {torch.cuda.is_available()}")
             try:
                 cut_set = CutSet.from_manifests(
                     recordings=m["recordings"],
@@ -172,13 +188,11 @@ def main():
             # AudioTokenizer
             if args.audio_extractor:
                 if args.audio_extractor == "Encodec":
-                    storage_path = (
-                        f"{args.output_dir}/{args.prefix}_encodec_{partition}"
-                    )
+                    storage_path = f"{args.output_dir}/{args.prefix}_encodec_{partition}"
+                elif args.audio_extractor == "TiCodec":
+                    storage_path = f"{args.output_dir}/{args.prefix}_ticodec_{partition}"
                 else:
-                    storage_path = (
-                        f"{args.output_dir}/{args.prefix}_fbank_{partition}"
-                    )
+                    storage_path = f"{args.output_dir}/{args.prefix}_fbank_{partition}"
 
                 if args.prefix.lower() in ["ljspeech", "aishell", "baker"]:
                     cut_set = cut_set.resample(24000)
@@ -191,10 +205,7 @@ def main():
                     #     )
 
                 with torch.no_grad():
-                    if (
-                        torch.cuda.is_available()
-                        and args.audio_extractor == "Encodec"
-                    ):
+                    if args.audio_extractor in ["Encodec", "TiCodec"]:
                         cut_set = cut_set.compute_and_store_features_batch(
                             extractor=audio_extractor,
                             storage_path=storage_path,
@@ -215,10 +226,7 @@ def main():
 
             # TextTokenizer
             if args.text_extractor:
-                if (
-                    args.prefix == "baker"
-                    and args.text_extractor == "labeled_pinyin"
-                ):
+                if args.prefix == "baker" and args.text_extractor == "labeled_pinyin":
                     for c in tqdm(cut_set):
                         phonemes = c.supervisions[0].custom["tokens"]["text"]
                         unique_symbols.update(phonemes)
@@ -229,15 +237,11 @@ def main():
                             text = text.replace("”", '"').replace("“", '"')
                             phonemes = tokenize_text(text_tokenizer, text=text)
                         elif args.prefix == "aishell":
-                            phonemes = tokenize_text(
-                                text_tokenizer, text=c.supervisions[0].text
-                            )
+                            phonemes = tokenize_text(text_tokenizer, text=c.supervisions[0].text)
                             c.supervisions[0].custom = {}
                         else:
                             assert args.prefix == "libritts"
-                            phonemes = tokenize_text(
-                                text_tokenizer, text=c.supervisions[0].text
-                            )
+                            phonemes = tokenize_text(text_tokenizer, text=c.supervisions[0].text)
                         c.supervisions[0].custom["tokens"] = {"text": phonemes}
                         unique_symbols.update(phonemes)
 
@@ -255,8 +259,6 @@ def main():
 
 
 if __name__ == "__main__":
-    formatter = (
-        "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
-    )
+    formatter = "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
     logging.basicConfig(format=formatter, level=logging.INFO)
     main()

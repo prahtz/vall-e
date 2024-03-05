@@ -29,6 +29,7 @@ from phonemizer.backend.espeak.language_switch import LanguageSwitch
 from phonemizer.backend.espeak.words_mismatch import WordMismatch
 from phonemizer.punctuation import Punctuation
 from phonemizer.separator import Separator
+from TiCodec.academicodec.models.ticodec.vqvae import VQVAE
 
 try:
     from pypinyin import Style, pinyin
@@ -51,9 +52,7 @@ class PypinyinBackend:
         self.backend = backend
         self.punctuation_marks = punctuation_marks
 
-    def phonemize(
-        self, text: List[str], separator: Separator, strip=True, njobs=1
-    ) -> List[str]:
+    def phonemize(self, text: List[str], separator: Separator, strip=True, njobs=1) -> List[str]:
         assert isinstance(text, List)
         phonemized = []
         for _text in text:
@@ -61,11 +60,7 @@ class PypinyinBackend:
             _text = _text.replace(" ", separator.word)
             phones = []
             if self.backend == "pypinyin":
-                for n, py in enumerate(
-                    pinyin(
-                        _text, style=Style.TONE3, neutral_tone_with_five=True
-                    )
-                ):
+                for n, py in enumerate(pinyin(_text, style=Style.TONE3, neutral_tone_with_five=True)):
                     if all([c in self.punctuation_marks for c in py[0]]):
                         if len(phones):
                             assert phones[-1] == separator.syllable
@@ -75,11 +70,7 @@ class PypinyinBackend:
                     else:
                         phones.extend([py[0], separator.syllable])
             elif self.backend == "pypinyin_initials_finals":
-                for n, py in enumerate(
-                    pinyin(
-                        _text, style=Style.TONE3, neutral_tone_with_five=True
-                    )
-                ):
+                for n, py in enumerate(pinyin(_text, style=Style.TONE3, neutral_tone_with_five=True)):
                     if all([c in self.punctuation_marks for c in py[0]]):
                         if len(phones):
                             assert phones[-1] == separator.syllable
@@ -89,10 +80,7 @@ class PypinyinBackend:
                         if py[0][-1].isalnum():
                             initial = get_initials(py[0], strict=False)
                             if py[0][-1].isdigit():
-                                final = (
-                                    get_finals(py[0][:-1], strict=False)
-                                    + py[0][-1]
-                                )
+                                final = get_finals(py[0][:-1], strict=False) + py[0][-1]
                             else:
                                 final = get_finals(py[0], strict=False)
                             phones.extend(
@@ -107,9 +95,7 @@ class PypinyinBackend:
                             assert ValueError
             else:
                 raise NotImplementedError
-            phonemized.append(
-                "".join(phones).rstrip(f"{separator.word}{separator.syllable}")
-            )
+            phonemized.append("".join(phones).rstrip(f"{separator.word}{separator.syllable}"))
         return phonemized
 
 
@@ -154,22 +140,15 @@ class TextTokenizer:
         for word in phonemized.split(self.separator.word):
             # "ɐ    m|iː|n?"    ɹ|ɪ|z|ɜː|v; h|ɪ|z.
             pp = re.findall(r"\w+|[^\w\s]", word, re.UNICODE)
-            fields.extend(
-                [p for p in pp if p != self.separator.phone]
-                + [self.separator.word]
-            )
-        assert len("".join(fields[:-1])) == len(phonemized) - phonemized.count(
-            self.separator.phone
-        )
+            fields.extend([p for p in pp if p != self.separator.phone] + [self.separator.word])
+        assert len("".join(fields[:-1])) == len(phonemized) - phonemized.count(self.separator.phone)
         return fields[:-1]
 
     def __call__(self, text, strip=True) -> List[List[str]]:
         if isinstance(text, str):
             text = [text]
 
-        phonemized = self.backend.phonemize(
-            text, separator=self.separator, strip=strip, njobs=1
-        )
+        phonemized = self.backend.phonemize(text, separator=self.separator, strip=strip, njobs=1)
         return [self.to_list(p) for p in phonemized]
 
 
@@ -275,9 +254,7 @@ class AudioTokenExtractor(FeatureExtractor):
         super(AudioTokenExtractor, self).__init__(config)
         self.tokenizer = AudioTokenizer()
 
-    def extract(
-        self, samples: Union[np.ndarray, torch.Tensor], sampling_rate: int
-    ) -> np.ndarray:
+    def extract(self, samples: Union[np.ndarray, torch.Tensor], sampling_rate: int) -> np.ndarray:
         if not isinstance(samples, torch.Tensor):
             samples = torch.from_numpy(samples)
         if sampling_rate != self.tokenizer.sample_rate:
@@ -318,9 +295,7 @@ class AudioTokenExtractor(FeatureExtractor):
         lengths = [tensor.shape[0] for tensor in tensor_list]
         # 使用pad_sequence函数进行填充
         tensor_list = [torch.Tensor(t).to(device) for t in tensor_list]
-        padded_tensor = torch.nn.utils.rnn.pad_sequence(
-            tensor_list, batch_first=True, padding_value=padding_value
-        )
+        padded_tensor = torch.nn.utils.rnn.pad_sequence(tensor_list, batch_first=True, padding_value=padding_value)
         return padded_tensor, lengths
 
     def extract_batch(self, samples, sampling_rate, lengths) -> np.ndarray:
@@ -343,7 +318,7 @@ class AudioTokenExtractor(FeatureExtractor):
                 )
                 for wav in samples
             ]
-            samples = torch.stack(samples, 0) # convert samples from list to tensor
+            samples = torch.stack(samples, 0)  # convert samples from list to tensor
         # Extract discrete codes from EnCodec
         with torch.no_grad():
             encoded_frames = self.tokenizer.encode(samples.detach().to(device))
@@ -361,16 +336,208 @@ class AudioTokenExtractor(FeatureExtractor):
         return [codes.cpu().permute(1, 0).numpy() for codes in batch_codes]
 
 
+# TODO: generalize Audio{Tokenizer/TokenExtractor/TokenConfig} classes
+class TiCodecAudioTokenizer:
+    """TiCodec audio."""
+
+    def __init__(
+        self,
+        config_path: str,
+        ckpt_path: str,
+        device: Any = None,
+    ) -> None:
+        # Instantiate a pretrained TiCodec model
+        model = VQVAE(config_path=config_path, ckpt_path=ckpt_path, with_encoder=True)
+        model.encoder.remove_weight_norm()
+        model.generator.remove_weight_norm()
+        model.eval()
+
+        if not device:
+            device = torch.device("cpu")
+            if torch.cuda.is_available():
+                device = torch.device("cuda:0")
+
+        self._device = device
+
+        self.codec = model.to(device)
+        self.sample_rate = 24000
+        self.channels = 1
+
+    @property
+    def device(self):
+        return self._device
+
+    def encode(self, wav: torch.Tensor) -> torch.Tensor:
+        return self.codec.encode(wav.to(self.device))
+
+    def decode(self, codes: torch.Tensor, global_codes: torch.Tensor) -> torch.Tensor:
+        return self.codec(codes, global_codes)
+
+
+def tokenize_audio(tokenizer: AudioTokenizer, audio_path: str):
+    # Load and pre-process the audio waveform
+    wav, sr = torchaudio.load(audio_path)
+    wav = convert_audio(wav, sr, tokenizer.sample_rate, tokenizer.channels)
+    if isinstance(tokenizer, AudioTokenizer):
+        wav = wav.unsqueeze(0)
+
+    # Extract discrete codes and time invariant codes from TiCodec
+    with torch.no_grad():
+        if isinstance(tokenizer, AudioTokenizer):
+            codes = tokenizer.encode(wav)
+            return codes
+        elif isinstance(tokenizer, TiCodecAudioTokenizer):
+            codes, global_codes = tokenizer.encode(wav)
+            return codes, global_codes
+
+
+@dataclass
+class TiCodecAudioTokenConfig:
+    config_path: str
+    ckpt_path: str
+    frame_shift: Seconds = 320.0 / 24000
+    num_quantizers: int = 1
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> "TiCodecAudioTokenConfig":
+        return TiCodecAudioTokenConfig(**data)
+
+
+class TiCodecAudioTokenExtractor(FeatureExtractor):
+    name = "ticodec"
+    config_type = TiCodecAudioTokenConfig
+
+    def __init__(self, config: Optional[Any] = None):
+        super(TiCodecAudioTokenExtractor, self).__init__(config)
+        self.tokenizer = TiCodecAudioTokenizer(config_path=config.config_path, ckpt_path=config.ckpt_path)
+
+    def extract(self, samples: Union[np.ndarray, torch.Tensor], sampling_rate: int) -> np.ndarray:
+        if not isinstance(samples, torch.Tensor):
+            samples = torch.from_numpy(samples)
+        if sampling_rate != self.tokenizer.sample_rate:
+            samples = convert_audio(
+                samples,
+                sampling_rate,
+                self.tokenizer.sample_rate,
+                self.tokenizer.channels,
+            )
+            sampling_rate = self.tokenizer.sample_rate
+        if len(samples.shape) == 1:
+            samples.unsqueeze(0)
+        assert len(samples.shape) == 2
+
+        device = self.tokenizer.device
+        with torch.no_grad():
+            codes, global_codes = self.tokenizer.encode(samples.detach().to(device))
+            codes = codes.permute(0, 2, 1)
+        duration = round(samples.shape[-1] / sampling_rate, ndigits=12)
+        expected_num_frames = compute_num_frames(
+            duration=duration,
+            frame_shift=self.frame_shift,
+            sampling_rate=sampling_rate,
+        )
+        assert abs(codes.shape[-1] - expected_num_frames) <= 1
+        codes = codes[..., :expected_num_frames]
+        return codes.cpu().squeeze(0).permute(1, 0).numpy()
+
+    @property
+    def frame_shift(self) -> Seconds:
+        return self.config.frame_shift
+
+    def feature_dim(self, sampling_rate: int) -> int:
+        return self.config.num_quantizers
+
+    def pad_tensor_list(self, tensor_list, device, padding_value=0):
+        # 计算每个张量的长度
+        lengths = [tensor.shape[0] for tensor in tensor_list]
+        # 使用pad_sequence函数进行填充
+        tensor_list = [torch.Tensor(t).to(device) for t in tensor_list]
+        padded_tensor = torch.nn.utils.rnn.pad_sequence(tensor_list, batch_first=True, padding_value=padding_value)
+        return padded_tensor, lengths
+
+    def extract_batch(self, samples, sampling_rate, lengths) -> np.ndarray:
+        if sampling_rate != self.tokenizer.sample_rate:
+            samples = [
+                convert_audio(
+                    wav,
+                    sampling_rate,
+                    self.tokenizer.sample_rate,
+                    self.tokenizer.channels,
+                )
+                for wav in samples
+            ]
+            sampling_rate = self.tokenizer.sample_rate
+
+        samples = [wav.squeeze() for wav in samples]
+        device = self.tokenizer.device
+        samples, lengths = self.pad_tensor_list(samples, device)
+        samples = samples.unsqueeze(1)
+        if not isinstance(samples, torch.Tensor):
+            samples = torch.from_numpy(samples)
+        if len(samples.shape) != 3:
+            raise ValueError()
+
+        # Extract discrete codes from EnCodec
+        samples = samples.squeeze(1)
+        with torch.no_grad():
+            codes, global_codes = self.tokenizer.encode(samples.detach().to(device))
+            codes = codes.permute(0, 2, 1)
+        batch_codes = []
+        for b, length in enumerate(lengths):
+            code = codes[b]
+            duration = round(length / sampling_rate, ndigits=12)
+            expected_num_frames = compute_num_frames(
+                duration=duration,
+                frame_shift=self.frame_shift,
+                sampling_rate=sampling_rate,
+            )
+            batch_codes.append(code[..., :expected_num_frames])
+        return [code.cpu().permute(1, 0).numpy() for code in batch_codes]
+
+
+import argparse
+
 if __name__ == "__main__":
-    model = EncodecModel.encodec_model_24khz()
-    model.set_target_bandwidth(6.0)
-
-    samples = torch.from_numpy(np.random.random([4, 1, 1600])).type(
-        torch.float32
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--audio-extractor",
+        type=str,
+        default="Encodec",
+        help="Encodec, TiCodec or Fbank",
     )
-    codes_raw = model.encode(samples)
+    parser.add_argument(
+        "--ticodec-config-path",
+        type=str,
+        default=None,
+        help="TiCodec config file path",
+    )
+    parser.add_argument(
+        "--ticodec-ckpt-path",
+        type=str,
+        default=None,
+        help="TiCodec checkpoint file path",
+    )
+    args = parser.parse_args()
+    if args.audio_extractor == "TiCodec":
+        extractor = TiCodecAudioTokenExtractor(
+            TiCodecAudioTokenConfig(config_path=args.ticodec_config_path, ckpt_path=args.ticodec_ckpt_path),
+        )
+        samples = [torch.from_numpy(np.random.random([1, 3 * 24000])).type(torch.float32) for t in range(4)]
+        sample = samples[0]
+        sampling_rate = 24000
+        out = extractor.extract(samples=sample, sampling_rate=sampling_rate)
+        out = extractor.extract_batch(samples=samples, sampling_rate=sampling_rate, lengths=None)
+    else:
+        model = EncodecModel.encodec_model_24khz()
+        model.set_target_bandwidth(6.0)
 
-    remove_encodec_weight_norm(model)
-    codes_norm = model.encode(samples)
+        samples = torch.from_numpy(np.random.random([4, 1, 1600])).type(torch.float32)
+        codes_raw = model.encode(samples)
 
-    assert torch.allclose(codes_raw[0][0], codes_norm[0][0])
+        remove_encodec_weight_norm(model)
+        codes_norm = model.encode(samples)
+
+        assert torch.allclose(codes_raw[0][0], codes_norm[0][0])

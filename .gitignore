@@ -8,6 +8,7 @@ log
 .DS_Store
 .vscode
 egs/*/data
+egs/*/download
 egs/libritts/prompts/*.png
 valle/version.py
 infer/

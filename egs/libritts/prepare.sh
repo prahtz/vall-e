@@ -52,7 +52,9 @@ dl_dir=$PWD/download
 # dataset_parts="-p dev-clean -p test-clean"  # debug
 dataset_parts="--dataset-parts all"  # all
 
-audio_extractor="Encodec"  # or Fbank
+audio_extractor="TiCodec"  # Encodec, TiCodec or Fbank
+ticodec_config_path=../../../TiCodec/egs/TiCodec-24k-320d/config_24k_320d_conv_1g1r_8g3k1s.json
+ticodec_ckpt_path=../../../TiCodec/checkpoints/1codebook/g_00300000
 audio_feats_dir=data/tokenized
 
 . shared/parse_options.sh || exit 1
@@ -101,6 +103,8 @@ if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
   if [ ! -e ${audio_feats_dir}/.libritts.tokenize.done ]; then
     python3 bin/tokenizer.py --dataset-parts "${dataset_parts}" \
         --audio-extractor ${audio_extractor} \
+        --ticodec-config-path ${ticodec_config_path} \
+        --ticodec-ckpt-path ${ticodec_ckpt_path} \
         --batch-duration 400 \
         --src-dir "data/manifests" \
         --output-dir "${audio_feats_dir}"
@@ -123,11 +127,13 @@ if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
       lhotse copy \
         ${audio_feats_dir}/libritts_cuts_dev-clean.jsonl.gz \
         ${audio_feats_dir}/cuts_dev.jsonl.gz
+        
     else  # debug
       # train
       lhotse copy \
         ${audio_feats_dir}/libritts_cuts_dev-clean.jsonl.gz \
         ${audio_feats_dir}/cuts_train.jsonl.gz
+
       # dev
       lhotse subset --first 400 \
         ${audio_feats_dir}/libritts_cuts_test-clean.jsonl.gz \
@@ -138,6 +144,10 @@ if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
     lhotse copy \
       ${audio_feats_dir}/libritts_cuts_test-clean.jsonl.gz \
       ${audio_feats_dir}/cuts_test.jsonl.gz
+
+    lhotse copy \
+      ${audio_feats_dir}/libritts_cuts_test-other.jsonl.gz \
+      ${audio_feats_dir}/cuts_test_other.jsonl.gz
 
     touch ${audio_feats_dir}/.libritts.train.done
   fi
