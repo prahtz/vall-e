@@ -29,7 +29,7 @@ from phonemizer.backend.espeak.language_switch import LanguageSwitch
 from phonemizer.backend.espeak.words_mismatch import WordMismatch
 from phonemizer.punctuation import Punctuation
 from phonemizer.separator import Separator
-from TiCodec.academicodec.models.ticodec.vqvae import VQVAE
+from academicodec.models.ticodec.vqvae import VQVAE
 
 try:
     from pypinyin import Style, pinyin
